@@ -8,6 +8,12 @@ $ make
 $ insmod hypervisor.ko
 ```
 
+Compile on NixOS with:
+```bash
+$ nix-shell shell.nix
+$ make -C $(nix-build -E '(import <nixpkgs> {}).linux.dev' --no-out-link)/lib/modules/*/build M=$(pwd) modules
+```
+
 See logs with
 ```
 $ dmesg --follow

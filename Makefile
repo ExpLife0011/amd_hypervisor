@@ -1,3 +1,4 @@
+EXTRA_CFLAGS="-masm=intel"
 ifeq ($(KERNELRELEASE),)
 		KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 		PWD := $(shell pwd)
