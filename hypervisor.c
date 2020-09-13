@@ -191,16 +191,13 @@ static int my_init(void) {
     break;
   case SVM_NOT_AVAIL:
     printk(KERN_ERR "Has SVM support: false\n");
-    ret = 1;
-    goto end;
+    return 1;
   case SVM_DISABLED_WITH_KEY:
     printk(KERN_ERR "SVM is bios disabled with key\n");
-    ret = 1;
-    goto end;
+    return 1;
   case SVM_DISABLED_AT_BIOS_NOT_UNLOCKABLE:
     printk(KERN_ERR "SVM is bios disabled not unlockable\n");
-    ret = 1;
-    goto end;
+    return 1;
   }
 
   if (!vmrun()) {
