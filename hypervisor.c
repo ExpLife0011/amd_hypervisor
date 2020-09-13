@@ -6,7 +6,7 @@ MODULE_AUTHOR("Qubasa Corp.");
 MODULE_LICENSE("GPL v2");
 
 // MASKS
-const uint64_t LOW_64  = 0x00000000ffffffff;
+const uint64_t LOW_64 = 0x00000000ffffffff;
 const uint64_t HIGH_64 = ~LOW_64;
 
 // MSR ADDRESSES
@@ -40,7 +40,6 @@ void readMSR(uint32_t id, uint32_t *hi, uint32_t *lo) {
 }
 
 void writeMSR(uint32_t id, uint32_t hi, uint32_t lo) {
-  printk(KERN_INFO "Trying to write to 0x%x\n", id);
   __asm__("wrmsr" : : "a"(lo), "d"(hi), "c"(id));
 }
 
@@ -123,45 +122,53 @@ bool vmrun(void) {
 
   // TODO: Check if memory is write back
   vmcb = (void *)kzalloc(4096, GFP_KERNEL);
-  printk("vmcb pointer: 0x%p\n", vmcb);
+  printk(KERN_INFO "vmcb pointer: 0x%lx\n", vmcb);
 
   if (vmcb == NULL) {
-    printk(KERN_INFO "Could not allocate memory for vmcb\n");
+    printk(KERN_ERR "Could not allocate memory for vmcb\n");
     return false;
   }
 
   // Check if vcmb is 4k aligned in memory
   if ((uint64_t)vmcb % 4096 != 0) {
-    printk(KERN_INFO "VMCB is not 4k aligned!\n");
+    printk(KERN_ERR "VMCB is not 4k aligned!\n");
     return false;
   }
 
-  hsave = (void *)kzalloc(4096, GFP_KERNEL);
-  printk("hsave pointer: 0x%p\n", hsave);
+  hsave = (void *)kzalloc(4096, GFP_KERNEL | GFP_HIGHUSER);
+  printk(KERN_INFO "hsave pointer is: 0x%lx\n", hsave);
+  if((uint64_t)hsave & (0xfff) > 0){
+    printk(KERN_ERR "The low 12 bits are not zero!\n");
+  }
 
   if (hsave == NULL) {
-    printk(KERN_INFO "Could not allocate memory for HSAVE\n");
+    printk(KERN_ERR "Could not allocate memory for HSAVE\n");
     return false;
   }
 
   // Check if vcmb is 4k aligned in memory
   if ((uint64_t)hsave % 4096 != 0) {
-    printk(KERN_INFO "HSAVE is not 4k aligned!\n");
+    printk(KERN_ERR "HSAVE is not 4k aligned!\n");
     return false;
   }
 
   enableSVM_EFER();
 
-  hsave_high = (uint32_t) ((uint64_t)hsave >> 32);
-  hsave_low = (uint32_t) ((uint64_t)hsave & LOW_64);
+  hsave_high = (uint32_t)((uint64_t)hsave >> 32);
+  hsave_low = (uint32_t)((uint64_t)hsave & LOW_64);
 
   // Write buffer address to HSAVE msr
   writeMSR(VM_HSAVE_PA_ADDR, hsave_high, hsave_low);
+  readMSR(VM_HSAVE_PA_ADDR, &hsave_high, &hsave_low);
+
+  hsave = (void *)((uint64_t)hsave_high << 32 | hsave_low);
+  printk(KERN_INFO "VM_HSAVE_PA_ADDR: 0x%lx\n", hsave);
 
   // Execute VMRUN instruction
-  __asm__("mov rax, %0"::"r"(vmcb):"rax");
+  printk(KERN_INFO "Start executing vmrun\n");
+  __asm__("mov rax, %0" ::"r"(vmcb) : "rax");
   __asm__("vmrun");
-  printk("Done executing vmrun\n");
+  printk(KERN_INFO "Done executing vmrun\n");
 
   return true;
 }
@@ -172,7 +179,7 @@ static int my_init(void) {
   printk(KERN_INFO "==== LOADED HYPERVISOR DRIVER ====\n");
 
   if (!hasMsrSupport()) {
-    printk(KERN_INFO "System does not have MSR support\n");
+    printk(KERN_ERR "System does not have MSR support\n");
     return 1;
   }
 
@@ -183,27 +190,27 @@ static int my_init(void) {
     printk(KERN_INFO "Has SVM support: true\n");
     break;
   case SVM_NOT_AVAIL:
-    printk(KERN_INFO "Has SVM support: false\n");
+    printk(KERN_ERR "Has SVM support: false\n");
     ret = 1;
     goto end;
   case SVM_DISABLED_WITH_KEY:
-    printk(KERN_INFO "SVM is bios disabled with key\n");
+    printk(KERN_ERR "SVM is bios disabled with key\n");
     ret = 1;
     goto end;
   case SVM_DISABLED_AT_BIOS_NOT_UNLOCKABLE:
-    printk(KERN_INFO "SVM is bios disabled not unlockable\n");
+    printk(KERN_ERR "SVM is bios disabled not unlockable\n");
     ret = 1;
     goto end;
   }
 
   if (!vmrun()) {
-    printk(KERN_INFO "vmrun failed\n");
+    printk(KERN_ERR "vmrun failed\n");
     ret = 1;
     goto end;
   }
 
 end:
-  printk(KERN_INFO "Freeing and returning vmcb 0x%p hsave 0x%p\n", vmcb, hsave);
+  printk(KERN_INFO "Freeing and returning vmcb 0x%lx hsave 0x%lx\n", vmcb, hsave);
   kfree(vmcb);
   kfree(hsave);
   return ret;
