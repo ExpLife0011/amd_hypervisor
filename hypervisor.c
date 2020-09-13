@@ -35,6 +35,15 @@ bool hasMsrSupport(void) {
   return false;
 }
 
+void readMSR_U64(uint32_t id, uint64_t *complete) {
+  uint64_t hi;
+  uint64_t lo;
+  __asm__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(id));
+
+  *complete = hi << 32;
+  *complete |= lo;
+}
+
 void readMSR(uint32_t id, uint32_t *hi, uint32_t *lo) {
   __asm__("rdmsr" : "=a"(*lo), "=d"(*hi) : "c"(id));
 }
@@ -114,15 +123,26 @@ void inline enableSVM_EFER(void) {
   writeMSR(EFER_ADDR, high, efer);
 }
 
+uint32_t get_max_asids(void){
+  unsigned int cpuid_response;
+
+  __asm__("mov rax, 0x8000000A" ::: "rax");
+  __asm__("cpuid");
+  __asm__("mov %0, ebx" : "=r"(cpuid_response));
+
+  return cpuid_response;
+}
+
 static void *vmcb = NULL;
 static void *hsave = NULL;
 bool vmrun(void) {
   uint32_t hsave_high;
   uint32_t hsave_low;
+  uint32_t max_asids;
 
   // TODO: Check if memory is write back
   vmcb = (void *)kzalloc(4096, GFP_KERNEL);
-  printk(KERN_INFO "vmcb pointer: 0x%lx\n", vmcb);
+  printk(KERN_INFO "vmcb pointer: 0x%p\n", vmcb);
 
   if (vmcb == NULL) {
     printk(KERN_ERR "Could not allocate memory for vmcb\n");
@@ -136,17 +156,18 @@ bool vmrun(void) {
   }
 
   hsave = (void *)kzalloc(4096, GFP_KERNEL | GFP_HIGHUSER);
-  printk(KERN_INFO "hsave pointer is: 0x%lx\n", hsave);
-  if((uint64_t)hsave & (0xfff) > 0){
-    printk(KERN_ERR "The low 12 bits are not zero!\n");
-  }
-
+  printk(KERN_INFO "hsave pointer is: 0x%p\n", hsave);
   if (hsave == NULL) {
     printk(KERN_ERR "Could not allocate memory for HSAVE\n");
     return false;
   }
 
-  // Check if vcmb is 4k aligned in memory
+  if(((uint64_t)hsave & (0xfff)) > 0){
+    printk(KERN_ERR "The low 12 bits are not zero!\n");
+    return false;
+  }
+
+  // Check if hsave is 4k aligned in memory
   if ((uint64_t)hsave % 4096 != 0) {
     printk(KERN_ERR "HSAVE is not 4k aligned!\n");
     return false;
@@ -159,10 +180,15 @@ bool vmrun(void) {
 
   // Write buffer address to HSAVE msr
   writeMSR(VM_HSAVE_PA_ADDR, hsave_high, hsave_low);
-  readMSR(VM_HSAVE_PA_ADDR, &hsave_high, &hsave_low);
+  readMSR_U64(VM_HSAVE_PA_ADDR, (uint64_t *)hsave);
 
-  hsave = (void *)((uint64_t)hsave_high << 32 | hsave_low);
-  printk(KERN_INFO "VM_HSAVE_PA_ADDR: 0x%lx\n", hsave);
+  printk(KERN_INFO "VM_HSAVE_PA_ADDR: 0x%p\n", hsave);
+
+  // Read max asids
+  max_asids = get_max_asids();
+  max_asids -= 1;
+  // Set asid in VMCB
+  memcpy((char*)vmcb+0x58, &max_asids, sizeof(uint32_t));
 
   // Execute VMRUN instruction
   printk(KERN_INFO "Start executing vmrun\n");
@@ -207,7 +233,7 @@ static int my_init(void) {
   }
 
 end:
-  printk(KERN_INFO "Freeing and returning vmcb 0x%lx hsave 0x%lx\n", vmcb, hsave);
+  printk(KERN_INFO "Freeing and returning vmcb 0x%p hsave 0x%p\n", vmcb, hsave);
   kfree(vmcb);
   kfree(hsave);
   return ret;
