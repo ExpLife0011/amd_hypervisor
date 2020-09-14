@@ -27,3 +27,4 @@ Interesting functions are:
 * pre_svm_run
 * pre_sev_run
 * svm_hardware_enable
+* svm_create_vcpu

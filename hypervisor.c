@@ -1,6 +1,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 
 MODULE_AUTHOR("Qubasa Corp.");
 MODULE_LICENSE("GPL v2");
@@ -135,19 +136,23 @@ uint32_t get_max_asids(void){
 
 static void *vmcb = NULL;
 static void *hsave = NULL;
+static struct page *hsave_page;
+static struct page *vmcb_page;
 bool vmrun(void) {
   uint32_t hsave_high;
   uint32_t hsave_low;
   uint32_t max_asids;
 
   // TODO: Check if memory is write back
-  vmcb = (void *)kzalloc(4096, GFP_KERNEL);
-  printk(KERN_INFO "vmcb pointer: 0x%p\n", vmcb);
+  vmcb_page = alloc_page(GFP_KERNEL_ACCOUNT);
 
-  if (vmcb == NULL) {
+  if (vmcb_page == NULL) {
     printk(KERN_ERR "Could not allocate memory for vmcb\n");
     return false;
   }
+  vmcb = page_address(vmcb_page);
+  clear_page(vmcb);
+  printk(KERN_INFO "vmcb pointer: 0x%p\n", vmcb);
 
   // Check if vcmb is 4k aligned in memory
   if ((uint64_t)vmcb % 4096 != 0) {
@@ -155,12 +160,14 @@ bool vmrun(void) {
     return false;
   }
 
-  hsave = (void *)kzalloc(4096, GFP_KERNEL | GFP_HIGHUSER);
-  printk(KERN_INFO "hsave pointer is: 0x%p\n", hsave);
-  if (hsave == NULL) {
+  hsave_page = alloc_page(GFP_KERNEL_ACCOUNT);
+  if (hsave_page == NULL) {
     printk(KERN_ERR "Could not allocate memory for HSAVE\n");
     return false;
   }
+  hsave = page_address(hsave_page);
+  clear_page(hsave);
+  printk(KERN_INFO "hsave pointer is: 0x%p\n", hsave);
 
   if(((uint64_t)hsave & (0xfff)) > 0){
     printk(KERN_ERR "The low 12 bits are not zero!\n");
@@ -187,6 +194,7 @@ bool vmrun(void) {
   // Read max asids
   max_asids = get_max_asids();
   max_asids -= 1;
+  printk(KERN_INFO "VM asid is: %d\n", max_asids);
   // Set asid in VMCB
   memcpy((char*)vmcb+0x58, &max_asids, sizeof(uint32_t));
 
@@ -234,8 +242,8 @@ static int my_init(void) {
 
 end:
   printk(KERN_INFO "Freeing and returning vmcb 0x%p hsave 0x%p\n", vmcb, hsave);
-  kfree(vmcb);
-  kfree(hsave);
+  /* kfree(vmcb); */
+  /* kfree(hsave); */
   return ret;
 }
 
