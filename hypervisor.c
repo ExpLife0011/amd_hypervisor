@@ -1,19 +1,7 @@
-#include <linux/init.h>
-#include <linux/module.h>
-#include <linux/slab.h>
-#include <linux/mm.h>
+#include "hypervisor.h"
 
 MODULE_AUTHOR("Qubasa Corp.");
 MODULE_LICENSE("GPL v2");
-
-// MASKS
-const uint64_t LOW_64 = 0x00000000ffffffff;
-const uint64_t HIGH_64 = ~LOW_64;
-
-// MSR ADDRESSES
-const unsigned int EFER_ADDR = 0xC0000080;
-const unsigned int VM_CR_ADDR = 0xC0010114;
-const unsigned int VM_HSAVE_PA_ADDR = 0xC0010117;
 
 enum SVM_SUPPORT {
   SVM_ALLOWED,
@@ -34,23 +22,6 @@ bool hasMsrSupport(void) {
     return true;
   }
   return false;
-}
-
-void readMSR_U64(uint32_t id, uint64_t *complete) {
-  uint64_t hi;
-  uint64_t lo;
-  __asm__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(id));
-
-  *complete = hi << 32;
-  *complete |= lo;
-}
-
-void readMSR(uint32_t id, uint32_t *hi, uint32_t *lo) {
-  __asm__("rdmsr" : "=a"(*lo), "=d"(*hi) : "c"(id));
-}
-
-void writeMSR(uint32_t id, uint32_t hi, uint32_t lo) {
-  __asm__("wrmsr" : : "a"(lo), "d"(hi), "c"(id));
 }
 
 bool isSvmDisabled_VM_CR(void) {
@@ -97,10 +68,10 @@ enum SVM_SUPPORT checkSvmSupport(void) {
 }
 
 void inline enableSVM_EFER(void) {
-  uint32_t efer;
-  uint32_t high;
   uint64_t cr0;
   uint64_t cs;
+  uint32_t efer;
+  uint32_t high;
 
   // Check CPL0
   // Processor must be in protected mode
@@ -108,7 +79,7 @@ void inline enableSVM_EFER(void) {
   // Read VM_CR MSR
   readMSR(EFER_ADDR, &high, &efer);
   printk(KERN_INFO "Is EFER.SVM enabled: %s\n",
-         efer & (1 << 12) ? "true" : "false");
+         efer & MY_EFER_SVME ? "true" : "false");
 
   // Check if processor in protected mode
   __asm__("mov %0, cr0" : "=r"(cr0));
@@ -120,36 +91,48 @@ void inline enableSVM_EFER(void) {
   printk(KERN_INFO "DPL is: %lld\n", cs & ((1 << 13) | (1 << 14)));
 
   // Enable EFER.SVM
-  efer |= 1 << 12;
+  printk(KERN_INFO "Write 1 to enable EFER.SVM\n");
+  efer |= MY_EFER_SVME;
   writeMSR(EFER_ADDR, high, efer);
+
+  readMSR(EFER_ADDR, &high, &efer);
+  printk(KERN_INFO "Is EFER.SVM enabled: %s\n",
+         efer & MY_EFER_SVME ? "true" : "false");
 }
 
-uint32_t get_max_asids(void){
-  unsigned int cpuid_response;
+uint32_t get_max_asids(void) {
+  uint32_t cpuid_response;
 
-  __asm__("mov rax, 0x8000000A" ::: "rax");
-  __asm__("cpuid");
-  __asm__("mov %0, ebx" : "=r"(cpuid_response));
+  __asm__("cpuid" : "=r"(cpuid_response) : "a"(0x8000000A));
 
   return cpuid_response;
 }
 
-static void *vmcb = NULL;
+void vmsave(void *vmcb_addr) {
+  printk(KERN_INFO "vmsave addr: %p\n", vmcb_addr);
+  __asm__("vmsave" ::"a"(vmcb_addr));
+}
+
+void vmrun(void *vmcb_addr){
+  __asm__("vmrun" ::"a"(vmcb_addr));
+}
+
+static struct vmcb *vmcb = NULL;
 static void *hsave = NULL;
-static struct page *hsave_page;
-static struct page *vmcb_page;
-bool vmrun(void) {
-  uint32_t hsave_high;
-  uint32_t hsave_low;
+static struct page *hsave_page = NULL;
+static struct page *vmcb_page = NULL;
+bool start_vm(void) {
   uint32_t max_asids;
 
   // TODO: Check if memory is write back
+  // Alloc page
   vmcb_page = alloc_page(GFP_KERNEL_ACCOUNT);
-
   if (vmcb_page == NULL) {
     printk(KERN_ERR "Could not allocate memory for vmcb\n");
     return false;
   }
+
+  // Zero page
   vmcb = page_address(vmcb_page);
   clear_page(vmcb);
   printk(KERN_INFO "vmcb pointer: 0x%p\n", vmcb);
@@ -160,19 +143,18 @@ bool vmrun(void) {
     return false;
   }
 
+  // Alloc page
   hsave_page = alloc_page(GFP_KERNEL_ACCOUNT);
   if (hsave_page == NULL) {
     printk(KERN_ERR "Could not allocate memory for HSAVE\n");
     return false;
   }
+
+  // Zero page
   hsave = page_address(hsave_page);
   clear_page(hsave);
   printk(KERN_INFO "hsave pointer is: 0x%p\n", hsave);
 
-  if(((uint64_t)hsave & (0xfff)) > 0){
-    printk(KERN_ERR "The low 12 bits are not zero!\n");
-    return false;
-  }
 
   // Check if hsave is 4k aligned in memory
   if ((uint64_t)hsave % 4096 != 0) {
@@ -182,26 +164,25 @@ bool vmrun(void) {
 
   enableSVM_EFER();
 
-  hsave_high = (uint32_t)((uint64_t)hsave >> 32);
-  hsave_low = (uint32_t)((uint64_t)hsave & LOW_64);
-
   // Write buffer address to HSAVE msr
-  writeMSR(VM_HSAVE_PA_ADDR, hsave_high, hsave_low);
+  writeMSR_U64(VM_HSAVE_PA_ADDR, *(uint64_t *)hsave);
   readMSR_U64(VM_HSAVE_PA_ADDR, (uint64_t *)hsave);
-
   printk(KERN_INFO "VM_HSAVE_PA_ADDR: 0x%p\n", hsave);
 
   // Read max asids
   max_asids = get_max_asids();
-  max_asids -= 1;
   printk(KERN_INFO "VM asid is: %d\n", max_asids);
+
   // Set asid in VMCB
-  memcpy((char*)vmcb+0x58, &max_asids, sizeof(uint32_t));
+  vmcb->control.asid = max_asids - 1;
+
+  printk(KERN_INFO "Executing vmsave\n");
+  vmsave((void*)vmcb);
+  printk(KERN_INFO "Done executing vmsave\n");
 
   // Execute VMRUN instruction
   printk(KERN_INFO "Start executing vmrun\n");
-  __asm__("mov rax, %0" ::"r"(vmcb) : "rax");
-  __asm__("vmrun");
+  vmrun((void*)vmcb);
   printk(KERN_INFO "Done executing vmrun\n");
 
   return true;
@@ -234,16 +215,20 @@ static int my_init(void) {
     return 1;
   }
 
-  if (!vmrun()) {
+  if (!start_vm()) {
     printk(KERN_ERR "vmrun failed\n");
     ret = 1;
     goto end;
   }
 
 end:
-  printk(KERN_INFO "Freeing and returning vmcb 0x%p hsave 0x%p\n", vmcb, hsave);
-  /* kfree(vmcb); */
-  /* kfree(hsave); */
+  printk(KERN_INFO "Trying to free vmcb 0x%p hsave 0x%p\n", vmcb, hsave);
+  if (vmcb_page != NULL) {
+    __free_page(vmcb_page);
+  }
+  if (hsave_page != NULL) {
+    __free_page(hsave_page);
+  }
   return ret;
 }
 
